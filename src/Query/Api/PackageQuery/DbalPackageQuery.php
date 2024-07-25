@@ -102,6 +102,40 @@ final class DbalPackageQuery implements PackageQuery
     }
 
     /**
+     * @return Option<Package>
+     */
+    public function getByName(string $organizationId, string $name): Option
+    {
+        $data = $this->connection->fetchAssociative(
+            'SELECT
+                id,
+                type,
+                repository_url,
+                name,
+                latest_released_version,
+                latest_release_date,
+                description,
+                last_sync_at,
+                last_sync_error,
+                webhook_created_at,
+                last_scan_date,
+                last_scan_status,
+                last_scan_result,
+                keep_last_releases,
+                enable_security_scan
+            FROM "organization_package"
+            WHERE organization_id = :organization_id AND name = :name', [
+            'organization_id' => $organizationId,
+            'name' => $name,
+        ]);
+        if ($data === false) {
+            return Option::none();
+        }
+
+        return Option::some($this->hydratePackage($data));
+    }
+
+    /**
      * @param array<string,mixed> $data
      */
     private function hydratePackage(array $data): Package

@@ -49,6 +49,11 @@ flysystem:
                 store: 'cache.app'
                 source: 'storage.s3.repo'
 
+        artifacts.storage:
+            adapter: 'local'
+            options:
+                directory: '%artifacts_dir%'
+
         repo.storage:
             adapter: 'lazy'
             options:

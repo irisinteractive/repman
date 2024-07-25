@@ -16,22 +16,29 @@ use Buddy\Repman\Message\Organization\Package\Update;
 use Buddy\Repman\Message\Organization\SynchronizePackage;
 use Buddy\Repman\Query\User\Model\Organization;
 use Buddy\Repman\Query\User\Model\Package;
+use Buddy\Repman\Query\Api\PackageQuery;
 use Buddy\Repman\Security\Model\User;
 use Buddy\Repman\Service\IntegrationRegister;
+use Buddy\Repman\Service\PackageArtifactUploader;
 use Buddy\Repman\Service\User\UserOAuthTokenProvider;
 use Http\Client\Exception as HttpException;
+use Munus\Control\Option;
 use Ramsey\Uuid\Uuid;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+use Symfony\Component\Form\Extension\Core\Type\FileType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormInterface;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Messenger\MessageBusInterface;
 use Symfony\Component\Routing\Annotation\Route;
 use Symfony\Component\Routing\RouterInterface;
+use Symfony\Component\Validator\Constraints\All;
+use Symfony\Component\Validator\Constraints\File;
 use Symfony\Component\Validator\Constraints\NotBlank;
 
 final class PackageController extends AbstractController
@@ -39,15 +46,21 @@ final class PackageController extends AbstractController
     private UserOAuthTokenProvider $oauthProvider;
     private IntegrationRegister $integrations;
     private MessageBusInterface $messageBus;
+    private PackageArtifactUploader $packageArtifactUploader;
+    private PackageQuery $packageQuery;
 
     public function __construct(
         UserOAuthTokenProvider $oauthProvider,
         IntegrationRegister $integrations,
-        MessageBusInterface $messageBus
+        MessageBusInterface $messageBus,
+        PackageArtifactUploader $packageArtifactUploader,
+        PackageQuery $packageQuery
     ) {
         $this->oauthProvider = $oauthProvider;
         $this->integrations = $integrations;
         $this->messageBus = $messageBus;
+        $this->packageArtifactUploader = $packageArtifactUploader;
+        $this->packageQuery = $packageQuery;
     }
 
     /**
@@ -77,8 +90,10 @@ final class PackageController extends AbstractController
                     $response = $this->packageNewFromUrl('url', $form, $organization, $request);
                     break;
                 case 'path':
+                    $response = $this->packageNewFromUrl('path', $form, $organization, $request);
+                    break;
                 case 'artifact':
-                    $response = $this->packageNewFromUrl($type, $form, $organization, $request);
+                    $response = $this->packageNewFromFile($form, $organization, $request);
                     break;
                 case 'github':
                     $response = $this->packageNewFromGitHub($form, $organization, $request);
@@ -318,5 +333,76 @@ final class PackageController extends AbstractController
         $user = parent::getUser();
 
         return $user;
+    }
+
+    /**
+     * Imports new package from uploaded files.
+     *
+     * @param FormInterface $form The form.
+     * @param Organization $organization The organization.
+     * @param Request $request The request.
+     *
+     * @return Response|null The response if the form is submitted and valid, null otherwise.
+     */
+    private function packageNewFromFile(FormInterface $form, Organization $organization, Request $request): ?Response
+    {
+        $form->remove('url');
+        $form->add('files', FileType::class, [
+            'label' => 'Package archives files',
+            'required' => false,
+            'help' => 'Your uploaded archives need to contain a valid composer.json file in its root directory, must be of type zip and must be of size less than ' . ini_get('post_max_size') . '.',
+            'attr' => [
+                'class' => 'formFile form-control',
+                'multiple' => 'multiple'
+            ],
+            'multiple' => true,
+            'constraints' => [
+                new All([
+                    'constraints' => [
+                        new File([
+                            'maxSize' => ini_get('post_max_size'),
+                            'mimeTypes' => [
+                                'application/octet-stream',
+                                'application/zip',
+                                'application/x-zip',
+                                'application/x-zip-compressed'
+                            ]
+                        ])
+                    ]
+                ])
+            ],
+            'mapped' => false
+        ]);
+
+        $form->handleRequest($request);
+
+        if ($form->isSubmitted() && $form->isValid()) {
+            /** @var UploadedFile[] $file */
+            $files = $form->get('files')->getData();
+
+            foreach ($this->packageArtifactUploader->save($files, $organization) as $packageName => $packagePath) {
+
+                /* @var Option<\Buddy\Repman\Query\Api\Model\Package> $package */
+                $package = $this->packageQuery->getByName($organization->id(), $packageName);
+                if ($package->isEmpty()) {
+                    $this->messageBus->dispatch(new AddPackage(
+                        $id = Uuid::uuid4()->toString(),
+                        $organization->id(),
+                        $packagePath,
+                        'artifact',
+                        [],
+                        $form->get('keepLastReleases')->getData()
+                    ));
+                } else {
+                    $id = $package->get()->getId();
+                }
+
+                $this->messageBus->dispatch(new SynchronizePackage($id));
+            }
+
+            return $this->packageHasBeenAdded($organization);
+        }
+
+        return null;
     }
 }

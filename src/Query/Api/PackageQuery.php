@@ -20,4 +20,9 @@ interface PackageQuery
      * @return Option<Package>
      */
     public function getById(string $organizationId, string $id): Option;
+
+    /**
+     * @return Option<Package>
+     */
+    public function getByName(string $organizationId, string $name): Option;
 }

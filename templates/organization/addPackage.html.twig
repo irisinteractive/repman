@@ -31,12 +31,12 @@
                                     {% elseif form.url.vars.label == 'path' %}
                                         Package path
                                         {% include 'component/docsLink.html.twig' with {'article': 'private-packages/#path'} %}
-                                    {% elseif form.url.vars.label == 'artifact' %}
-                                        Artifact path
-                                        {% include 'component/docsLink.html.twig' with {'article': 'private-packages/#artifact'} %}
                                     {% endif %}
                                 </label>
                                 {{ form_widget(form.url) }}
+                            {% endif %}
+                            {% if form.files is defined %}
+                                {{ form_row(form.files) }}
                             {% endif %}
                             {% if form.repositories is defined %}
                                 <label for="repositories" class="form-label mt-2 required">

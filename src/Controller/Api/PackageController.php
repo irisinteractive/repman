@@ -24,13 +24,16 @@ use Buddy\Repman\Query\Api\Model\Packages;
 use Buddy\Repman\Query\Api\PackageQuery;
 use Buddy\Repman\Query\User\Model\Organization;
 use Buddy\Repman\Service\IntegrationRegister;
+use Buddy\Repman\Service\PackageArtifactUploader;
 use Buddy\Repman\Service\User\UserOAuthTokenProvider;
+use Munus\Control\Option;
 use Nelmio\ApiDocBundle\Annotation\Model;
 use OpenApi\Annotations as OA;
 use Ramsey\Uuid\Uuid;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Component\Form\FormError;
 use Symfony\Component\Form\FormInterface;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -45,17 +48,20 @@ final class PackageController extends ApiController
     private UserOAuthTokenProvider $oauthProvider;
     private IntegrationRegister $integrations;
     private MessageBusInterface $messageBus;
+    private PackageArtifactUploader $packageArtifactUploader;
 
     public function __construct(
         PackageQuery $packageQuery,
         UserOAuthTokenProvider $oauthProvider,
         IntegrationRegister $integrations,
-        MessageBusInterface $messageBus
+        MessageBusInterface $messageBus,
+        PackageArtifactUploader $packageArtifactUploader
     ) {
         $this->packageQuery = $packageQuery;
         $this->oauthProvider = $oauthProvider;
         $this->integrations = $integrations;
         $this->messageBus = $messageBus;
+        $this->packageArtifactUploader = $packageArtifactUploader;
     }
 
     /**
@@ -289,7 +295,7 @@ final class PackageController extends ApiController
     }
 
     /**
-     * Add new package.
+     * Add new packages.
      *
      * @IsGranted("ROLE_ORGANIZATION_OWNER", subject="organization")
      *
@@ -300,14 +306,48 @@ final class PackageController extends ApiController
      * )
      *
      * @OA\RequestBody(
-     *     @Model(type=AddPackageType::class)
+     *     @OA\MediaType(
+     *         mediaType="application/json",
+     *         @OA\Schema(
+     *             ref=@Model(type=AddPackageType::class)
+     *         )
+     *     ),
+     *     @OA\MediaType(
+     *         mediaType="multipart/form-data",
+     *         @OA\Schema(
+     *             allOf={
+     *                 @OA\Property(
+     *                     property="package",
+     *                     type="object",
+     *                     @OA\Schema(
+     *                         @OA\Property(
+     *                             property="repository",
+     *                             type="string"
+     *                         ),
+     *                         @OA\Property(
+     *                             property="type",
+     *                             type="string"
+     *                         )
+     *                     )
+     *                 ),
+     *                 @OA\Schema(
+     *                     @OA\Property(
+     *                         property="files[]",
+     *                         type="array",
+     *                         @OA\Items(type="string", format="binary")
+     *                     )
+     *                 )
+     *             }
+     *         )
+     *     )
      * )
      *
      * @OA\Response(
      *     response=201,
-     *     description="Returns added package",
+     *     description="Returns added packages",
      *     @OA\JsonContent(
-     *        ref=@Model(type=Package::class)
+     *        type="array",
+     *        @OA\Items(ref=@Model(type=Package::class))
      *     )
      * )
      *
@@ -331,10 +371,10 @@ final class PackageController extends ApiController
         $form = $this->createApiForm(AddPackageType::class);
         $json = $this->parseJson($request);
         $type = $json['type'] ?? null;
-        $id = '';
+        $ids = [];
 
         try {
-            $id = $this->handleAddPackage($type, $form, $organization, $json);
+            $ids = $this->handleAddPackage($type, $form, $organization, $json);
         } catch (\InvalidArgumentException $exception) {
             if (!$form->isSubmitted()) {
                 $form->submit($json);
@@ -348,44 +388,49 @@ final class PackageController extends ApiController
             return $this->badRequest($this->getErrors($form));
         }
 
-        return $this->created($this->packageQuery->getById(
-            $organization->id(),
+        return $this->created(array_map(
+            fn($id) => $this->packageQuery->getById(
+                $organization->id(),
             (string) $id
-        )->get());
+        )->get(), $ids));
     }
 
     /**
-     * @param array<string,string> $json
+     * @param string|null $type
+     * @param FormInterface $form
+     * @param Organization $organization
+     * @param array $json
+     * @return array
      */
-    private function handleAddPackage(?string $type, FormInterface $form, Organization $organization, array $json): ?string
+    private function handleAddPackage(?string $type, FormInterface $form, Organization $organization, array $json): array
     {
-        $id = null;
+        $ids = [];
 
         switch ($type) {
             case 'git':
             case 'mercurial':
             case 'subversion':
-            case 'pear':
-                $id = $this->packageNewFromUrl($form, $organization, $json);
-                break;
             case 'path':
+            case 'pear':
+                $ids = [$this->packageNewFromUrl($form, $organization, $json)];
+                break;
             case 'artifact':
-                $id = $this->packageNewFromUrl($form, $organization, $json);
+                $ids = $this->packageNewFromFile($form, $organization, $json);
                 break;
             case 'github':
-                $id = $this->packageNewFromGitHub($form, $organization, $json);
+                $ids = [$this->packageNewFromGitHub($form, $organization, $json)];
                 break;
             case 'gitlab':
-                $id = $this->packageNewFromGitLab($form, $organization, $json);
+                $ids = [$this->packageNewFromGitLab($form, $organization, $json)];
                 break;
             case 'bitbucket':
-                $id = $this->packageNewFromBitbucket($form, $organization, $json);
+                $ids = [$this->packageNewFromBitbucket($form, $organization, $json)];
                 break;
             default:
                 $form->submit($json);
         }
 
-        return $id;
+        return $ids;
     }
 
     /**
@@ -543,5 +588,45 @@ final class PackageController extends ApiController
         }
 
         return $warning;
+    }
+
+    /**
+     * Packages new files from a form submission into the organization's artifacts.
+     *
+     * @param FormInterface $form The form containing the submitted data.
+     * @param Organization $organization The organization the artifacts belong to.
+     * @param array $json The JSON data from the form submission.
+     * @return array An array of package IDs that were created.
+     */
+    private function packageNewFromFile(FormInterface $form, Organization $organization, array $json): array
+    {
+        $ids = [];
+        $form->submit($json);
+        if (!$form->isValid()) {
+            return $ids;
+        }
+        /** @var UploadedFile[] $file */
+        $files = $form->get('file')->getData();
+
+        foreach ($this->packageArtifactUploader->save($files, $organization) as $packageName => $packagePath) {
+            /* @var Option<\Buddy\Repman\Query\Api\Model\Package> $package */
+            $package = $this->packageQuery->getByName($organization->id(), $packageName);
+            if ($package->isEmpty()) {
+                $this->messageBus->dispatch(new AddPackage(
+                    $id = Uuid::uuid4()->toString(),
+                    $organization->id(),
+                    $packagePath,
+                    'artifact',
+                    [],
+                    $form->get('keepLastReleases')->getData()
+                ));
+            } else {
+                $id = $package->get()->getId();
+            }
+            $this->messageBus->dispatch(new SynchronizePackage($id));
+            $ids[]=$id;
+        }
+
+        return $ids;
     }
 }

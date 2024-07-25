@@ -6,9 +6,12 @@ namespace Buddy\Repman\Form\Type\Api;
 
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+use Symfony\Component\Form\Extension\Core\Type\FileType;
 use Symfony\Component\Form\Extension\Core\Type\IntegerType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
+use Symfony\Component\Validator\Constraints\All;
+use Symfony\Component\Validator\Constraints\File;
 use Symfony\Component\Validator\Constraints\NotBlank;
 use Symfony\Component\Validator\Constraints\PositiveOrZero;
 
@@ -54,6 +57,29 @@ class AddPackageType extends AbstractType
                 'constraints' => [
                     new NotBlank(),
                 ],
+            ])
+            ->add('files', FileType::class, [
+                'required' => false,
+                'attr' => [
+                    'multiple' => 'multiple'
+                ],
+                'multiple' => true,
+                'constraints' => [
+                    new All([
+                        'constraints' => [
+                            new File([
+                                'maxSize' => ini_get('post_max_size'),
+                                'mimeTypes' => [
+                                    'application/octet-stream',
+                                    'application/zip',
+                                    'application/x-zip',
+                                    'application/x-zip-compressed'
+                                ]
+                            ])
+                        ]
+                    ])
+                ],
+                'mapped' => false
             ])
             ->add('keepLastReleases', IntegerType::class, [
                 'data' => 0,
