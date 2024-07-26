@@ -6,20 +6,29 @@ namespace Buddy\Repman\Service\Dist;
 
 use Buddy\Repman\Service\Dist;
 use Buddy\Repman\Service\Downloader;
+use Exception;
+use League\Flysystem\FileExistsException;
 use League\Flysystem\FileNotFoundException;
 use League\Flysystem\FilesystemInterface;
 use Munus\Control\Option;
+use RuntimeException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Throwable;
+use ValueError;
+use ZipArchive;
+use function sprintf;
 
 class Storage
 {
     private Downloader $downloader;
     private FilesystemInterface $repoFilesystem;
+    private string $distsUrlTemplate;
 
-    public function __construct(Downloader $downloader, FilesystemInterface $repoFilesystem)
+    public function __construct(Downloader $downloader, FilesystemInterface $repoFilesystem, string $distsUrlTemplate)
     {
         $this->downloader = $downloader;
         $this->repoFilesystem = $repoFilesystem;
+        $this->distsUrlTemplate = $distsUrlTemplate;
     }
 
     public function has(Dist $dist): bool
@@ -28,12 +37,19 @@ class Storage
     }
 
     /**
-     * @param string[] $headers
+     * Downloads a file from a given URL and saves it locally.
+     *
+     * @param string $url
+     * @param Dist $dist
+     * @param array $headers
+     * @return string|null
+     * @throws FileExistsException
+     * @throws Throwable
      */
-    public function download(string $url, Dist $dist, array $headers = []): void
+    public function download(string $url, Dist $dist, array $headers = []): ?string
     {
         if ($this->has($dist)) {
-            return;
+            return null;
         }
 
         $filename = $this->filename($dist);
@@ -44,12 +60,17 @@ class Storage
                 $url,
                 $headers,
                 function () use ($url): void {
-                    throw new NotFoundHttpException(\sprintf('File not found at %s', $url));
+                    throw new NotFoundHttpException(sprintf('File not found at %s', $url));
                 }
             )->getOrElseThrow(
-                new \RuntimeException(\sprintf('Failed to download %s from %s', $dist->package(), $url))
+                new RuntimeException(sprintf('Failed to download %s from %s', $dist->package(), $url))
             )
         );
+
+        if (!filter_var($url, FILTER_VALIDATE_URL)) {
+            return self::updateDistUrl($url, $filename, $dist);
+        }
+        return null;
     }
 
     public function remove(Dist $dist): void
@@ -62,7 +83,7 @@ class Storage
 
     public function filename(Dist $dist): string
     {
-        return \sprintf(
+        return sprintf(
             '%s/dist/%s/%s_%s.%s',
             $dist->repo(),
             $dist->package(),
@@ -102,7 +123,7 @@ class Storage
             'wb'
         );
         if (false === $tmpLocalFileHandle) {
-            throw new \RuntimeException('Could not open temporary file for writing zip file for dist.');
+            throw new RuntimeException('Could not open temporary file for writing zip file for dist.');
         }
 
         $distReadStream = $this->readStream($distFilename)->getOrNull();
@@ -135,5 +156,59 @@ class Storage
         }
 
         return Option::of($resource);
+    }
+
+    /**
+     * Updates the dist URL in composer.json of a package.
+     *
+     * @param string $url
+     * @param string $filename
+     * @param Dist $dist
+     *
+     * @return string
+     */
+    private function updateDistUrl(string $url, string $filename, Dist $dist): string
+    {
+        try {
+            $zip = new ZipArchive();
+            $tmpLocalFilename = $this->getLocalFileForDist($dist);
+            $zip->open($tmpLocalFilename->get());
+            $composerJsonIndex = $zip->locateName('composer.json', ZipArchive::FL_NODIR);
+            $composerJsonZipPath = $zip->getNameIndex($composerJsonIndex);
+            $composerJsonStream = $zip->getStream($composerJsonZipPath);
+            $composerJson = json_decode(stream_get_contents($composerJsonStream));
+            fclose($composerJsonStream);
+            $repositoryUrl = str_replace('{organization}', $dist->repo(), $this->distsUrlTemplate);
+            $distUrl = sprintf(
+                '%s/dists/%s/%s/%s.zip',
+                $repositoryUrl,
+                $dist->package(),
+                $dist->version(),
+                $dist->ref()
+            );
+
+            $composerJson->dist = (object) [
+                'type' => 'zip',
+                'url' => $distUrl,
+                'reference' => $dist->ref(),
+            ];
+            $zip->addFromString($composerJsonZipPath, json_encode($composerJson, JSON_PRETTY_PRINT), ZipArchive::FL_OVERWRITE);
+            $zip->close();
+            $tmpLocalFilenameStream = fopen($tmpLocalFilename->get(), 'r');
+            $this->repoFilesystem->putStream($filename, $tmpLocalFilenameStream);
+            $artifactFileStream = fopen($url, 'w+');
+            stream_copy_to_stream($tmpLocalFilenameStream, $artifactFileStream);
+            fclose($artifactFileStream);
+            fclose($tmpLocalFilenameStream);
+            unlink($tmpLocalFilename->get());
+            return $distUrl;
+
+        } catch (Exception|ValueError $error) {
+            throw new RuntimeException(
+                sprintf('Failed to update dist URL in composer.json of package: %s:%s', $dist->package(), $dist->version()),
+                0,
+                $error
+            );
+        }
     }
 }

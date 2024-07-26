@@ -158,7 +158,7 @@ final class ComposerPackageSynchronizer implements PackageSynchronizer
                     continue;
                 }
 
-                $this->distStorage->download(
+                $overridedDistUrl = $this->distStorage->download(
                     $version['distUrl'],
                     $dist,
                     $this->getAuthHeaders($package)
@@ -205,6 +205,15 @@ final class ComposerPackageSynchronizer implements PackageSynchronizer
                 );
 
                 $encounteredVersions[$version['prettyVersion']] = true;
+
+                if ($overridedDistUrl !== null) {
+                    $json['packages'][$version['packageName']][$version['prettyVersion']]['dist'] = [
+                        'type' => 'zip',
+                        'url' => $overridedDistUrl,
+                        'reference' => $version['ref']
+                    ];
+                }
+
             }
 
             $package->syncSuccess(

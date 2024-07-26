@@ -126,6 +126,10 @@ services:
       arguments:
         $artifactsDir: '%artifacts_dir%'
 
+    Buddy\Repman\Service\Dist\Storage:
+      arguments:
+        $distsUrlTemplate: '%url_scheme%://{organization}%organization_separator%repo%domain_separator%%domain%'
+
     ### Vendor
     Github\Client:
         arguments:
